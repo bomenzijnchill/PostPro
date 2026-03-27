@@ -4,11 +4,14 @@ import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "@/hooks/use-auth";
 import { StatsCard } from "@/components/dashboard/stats-card";
 import { ProjectCard } from "@/components/dashboard/project-card";
+import { TaskBoard } from "@/components/dashboard/task-board";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Plus, FileSpreadsheet } from "lucide-react";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
+import type { Profile } from "@/lib/supabase/types";
 
 function getGreeting(): string {
   const hour = new Date().getHours();
@@ -68,21 +71,59 @@ export default function DashboardPage() {
     },
   });
 
-  const { data: myTasks } = useQuery({
-    queryKey: ["my-tasks", profile?.id],
-    enabled: !!profile?.id,
+  // Fetch ALL tasks with project/video info for the task board
+  const { data: allTasksData } = useQuery({
+    queryKey: ["all-tasks-board"],
     queryFn: async () => {
-      const today = new Date().toISOString().split("T")[0];
-      const { data, error } = await supabase
+      const { data: tasks, error } = await supabase
         .from("tasks")
-        .select("*, videos(name), projects(name, client_name)")
-        .eq("assigned_to", profile!.id)
-        .in("status", ["todo", "in_progress", "review"])
-        .lte("start_date", today)
-        .order("start_date")
-        .limit(10);
+        .select("*, profiles:assigned_to(id, name), videos(name), projects(name, client_name)")
+        .order("sort_order");
       if (error) throw error;
-      return data;
+
+      // Fetch time entries for all tasks
+      const taskIds = (tasks ?? []).map((t: { id: string }) => t.id);
+      let timeEntries: Array<{ task_id: string; hours: number }> = [];
+      if (taskIds.length > 0) {
+        const { data: entries } = await supabase
+          .from("time_entries")
+          .select("task_id, hours")
+          .in("task_id", taskIds);
+        timeEntries = entries ?? [];
+      }
+
+      const hoursMap = new Map<string, number>();
+      timeEntries.forEach((e) => {
+        hoursMap.set(e.task_id, (hoursMap.get(e.task_id) ?? 0) + Number(e.hours));
+      });
+
+      return (tasks ?? []).map((t: Record<string, unknown>) => ({
+        id: t.id as string,
+        name: t.name as string,
+        project_id: t.project_id as string,
+        project_name: (t.projects as Record<string, string>)?.name ?? "",
+        client_name: (t.projects as Record<string, string>)?.client_name ?? "",
+        video_name: (t.videos as Record<string, string>)?.name ?? "",
+        phase: t.phase as string,
+        status: t.status as string,
+        assigned_to: (t.profiles as Record<string, string> | null)?.id ?? null,
+        assigned_name: (t.profiles as Record<string, string> | null)?.name ?? null,
+        start_date: t.start_date as string | null,
+        end_date: t.end_date as string | null,
+        budgeted_hours: Number(t.budgeted_hours ?? 0),
+        logged_hours: hoursMap.get(t.id as string) ?? 0,
+        version_label: t.version_label as string | null,
+      }));
+    },
+  });
+
+  // Fetch members for the task board filters
+  const { data: members } = useQuery({
+    queryKey: ["org-members"],
+    queryFn: async () => {
+      const { data, error } = await supabase.from("profiles").select("*").order("name");
+      if (error) throw error;
+      return data as Profile[];
     },
   });
 
@@ -93,8 +134,12 @@ export default function DashboardPage() {
     year: "numeric",
   });
 
+  const activeProjects = projects?.filter((p) => p.status === "active") ?? [];
+  const completedProjects = projects?.filter((p) => p.status === "completed") ?? [];
+  const archivedProjects = projects?.filter((p) => p.status === "archived") ?? [];
+
   return (
-    <div className="p-6 lg:p-8 max-w-7xl mx-auto">
+    <div className="p-6 lg:p-8 max-w-[1600px] mx-auto">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4 mb-8">
         <div>
@@ -127,90 +172,103 @@ export default function DashboardPage() {
           ))
         ) : (
           <>
-            <StatsCard
-              label="actieve projecten"
-              value={stats?.activeProjects ?? 0}
-            />
-            <StatsCard
-              label="openstaande taken"
-              value={stats?.openTasks ?? 0}
-            />
-            <StatsCard
-              label="uren deze week"
-              value={stats?.hoursThisWeek ?? 0}
-              suffix="u"
-            />
+            <StatsCard label="actieve projecten" value={stats?.activeProjects ?? 0} />
+            <StatsCard label="openstaande taken" value={stats?.openTasks ?? 0} />
+            <StatsCard label="uren deze week" value={stats?.hoursThisWeek ?? 0} suffix="u" />
             <StatsCard
               label="budget health"
               value={`${stats?.budgetHealth ?? 0}%`}
-              color={
-                (stats?.budgetHealth ?? 0) > 80
-                  ? "text-success"
-                  : "text-warning"
-              }
+              color={(stats?.budgetHealth ?? 0) > 80 ? "text-success" : "text-warning"}
             />
           </>
         )}
       </div>
 
-      {/* My tasks today */}
-      {myTasks && myTasks.length > 0 && (
-        <div className="mb-8">
-          <h2 className="text-lg font-semibold mb-4">mijn taken vandaag</h2>
-          <div className="space-y-2">
-            {myTasks.map((task: Record<string, unknown>) => (
-              <Link
-                key={task.id as string}
-                href={`/projects/${task.project_id}`}
-                className="flex items-center gap-4 rounded-lg bg-card border border-border p-3 hover:border-border-hover transition-colors"
-              >
-                <div
-                  className={`w-2 h-2 rounded-full phase-${task.phase}`}
-                />
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium truncate">{task.name as string}</p>
-                  <p className="text-xs text-muted-foreground">
-                    {(task.projects as Record<string, string>)?.name} · {(task.videos as Record<string, string>)?.name}
-                  </p>
-                </div>
-                <span className="text-xs text-muted-foreground font-mono">
-                  {task.version_label as string}
-                </span>
-              </Link>
-            ))}
-          </div>
-        </div>
-      )}
+      {/* Main content tabs */}
+      <Tabs defaultValue="taken">
+        <TabsList className="bg-secondary mb-6">
+          <TabsTrigger value="taken">alle taken</TabsTrigger>
+          <TabsTrigger value="projecten">projecten</TabsTrigger>
+        </TabsList>
 
-      {/* Project grid */}
-      <div>
-        <h2 className="text-lg font-semibold mb-4">projecten</h2>
-        {projectsLoading ? (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {Array.from({ length: 6 }).map((_, i) => (
-              <Skeleton key={i} className="h-40 rounded-lg" />
-            ))}
-          </div>
-        ) : projects && projects.length > 0 ? (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {projects.map((project) => (
-              <ProjectCard key={project.id} project={project} />
-            ))}
-          </div>
-        ) : (
-          <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-border py-16">
-            <p className="text-muted-foreground mb-4">
-              nog geen projecten aangemaakt
-            </p>
-            <Link href="/projects/new">
-              <Button className="bg-accent-yellow text-background hover:bg-accent-yellow/90">
-                <Plus size={16} className="mr-2" />
-                eerste project aanmaken
-              </Button>
-            </Link>
-          </div>
-        )}
-      </div>
+        {/* All tasks board */}
+        <TabsContent value="taken">
+          {allTasksData && members ? (
+            <TaskBoard
+              tasks={allTasksData}
+              members={members}
+              currentUserId={profile?.id}
+            />
+          ) : (
+            <div className="space-y-2">
+              {Array.from({ length: 8 }).map((_, i) => (
+                <Skeleton key={i} className="h-12 rounded-lg" />
+              ))}
+            </div>
+          )}
+        </TabsContent>
+
+        {/* Projects */}
+        <TabsContent value="projecten">
+          {projectsLoading ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {Array.from({ length: 6 }).map((_, i) => (
+                <Skeleton key={i} className="h-40 rounded-lg" />
+              ))}
+            </div>
+          ) : (
+            <div className="space-y-8">
+              {activeProjects.length > 0 && (
+                <div>
+                  <h3 className="text-sm font-semibold text-success mb-3">
+                    actieve projecten ({activeProjects.length})
+                  </h3>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {activeProjects.map((project) => (
+                      <ProjectCard key={project.id} project={project} />
+                    ))}
+                  </div>
+                </div>
+              )}
+              {completedProjects.length > 0 && (
+                <div>
+                  <h3 className="text-sm font-semibold text-accent-purple mb-3">
+                    afgeronde projecten ({completedProjects.length})
+                  </h3>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {completedProjects.map((project) => (
+                      <ProjectCard key={project.id} project={project} />
+                    ))}
+                  </div>
+                </div>
+              )}
+              {archivedProjects.length > 0 && (
+                <div>
+                  <h3 className="text-sm font-semibold text-muted-foreground mb-3">
+                    gearchiveerde projecten ({archivedProjects.length})
+                  </h3>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {archivedProjects.map((project) => (
+                      <ProjectCard key={project.id} project={project} />
+                    ))}
+                  </div>
+                </div>
+              )}
+              {(!projects || projects.length === 0) && (
+                <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-border py-16">
+                  <p className="text-muted-foreground mb-4">nog geen projecten aangemaakt</p>
+                  <Link href="/projects/new">
+                    <Button className="bg-accent-yellow text-background hover:bg-accent-yellow/90">
+                      <Plus size={16} className="mr-2" />
+                      eerste project aanmaken
+                    </Button>
+                  </Link>
+                </div>
+              )}
+            </div>
+          )}
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

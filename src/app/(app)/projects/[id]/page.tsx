@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import { useParams } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import { createClient } from "@/lib/supabase/client";
@@ -8,6 +8,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { GanttView } from "@/components/project/gantt-view";
+import { GanttFilters } from "@/components/project/gantt-filters";
 import { TaskList } from "@/components/project/task-list";
 import { TaskDetailSheet } from "@/components/project/task-detail-sheet";
 import { cn } from "@/lib/utils";
@@ -32,11 +33,16 @@ export default function ProjectDetailPage() {
   const supabase = createClient();
   const [selectedTask, setSelectedTask] = useState<TaskWithAssignee | null>(null);
   const [sheetOpen, setSheetOpen] = useState(false);
+  const [filters, setFilters] = useState({
+    person: [] as string[],
+    phase: [] as string[],
+    status: [] as string[],
+    search: "",
+  });
 
   const { data, isLoading } = useQuery({
     queryKey: ["project-detail", projectId],
     queryFn: async () => {
-      // Fetch project
       const { data: project, error: projectError } = await supabase
         .from("projects")
         .select("*")
@@ -44,7 +50,6 @@ export default function ProjectDetailPage() {
         .single();
       if (projectError) throw projectError;
 
-      // Fetch videos with tasks
       const { data: videos, error: videosError } = await supabase
         .from("videos")
         .select("*")
@@ -52,7 +57,6 @@ export default function ProjectDetailPage() {
         .order("sort_order");
       if (videosError) throw videosError;
 
-      // Fetch tasks with assigned profiles and time entries
       const { data: tasks, error: tasksError } = await supabase
         .from("tasks")
         .select("*, profiles:assigned_to(id, name, avatar_url)")
@@ -60,7 +64,6 @@ export default function ProjectDetailPage() {
         .order("sort_order");
       if (tasksError) throw tasksError;
 
-      // Fetch time entries for all tasks
       const taskIds = tasks.map((t: { id: string }) => t.id);
       let timeEntries: Array<{ id: string; task_id: string; hours: number; logged_at: string; note: string | null; user_id: string; created_at: string }> = [];
       if (taskIds.length > 0) {
@@ -72,21 +75,16 @@ export default function ProjectDetailPage() {
         timeEntries = entries ?? [];
       }
 
-      // Fetch project members
       const { data: members } = await supabase
         .from("profiles")
         .select("*");
 
-      // Assemble videos with tasks
       const videosWithTasks: VideoWithTasks[] = (videos ?? []).map((video: { id: string; project_id: string; name: string; format: string | null; sort_order: number; budget_hours: number | null; notes: string | null }) => {
         const videoTasks: TaskWithAssignee[] = (tasks ?? [])
           .filter((t: { video_id: string }) => t.video_id === video.id)
           .map((t: Record<string, unknown>) => {
             const taskEntries = timeEntries.filter((e) => e.task_id === (t.id as string));
-            const loggedHours = taskEntries.reduce(
-              (sum, e) => sum + Number(e.hours),
-              0
-            );
+            const loggedHours = taskEntries.reduce((sum, e) => sum + Number(e.hours), 0);
             return {
               ...t,
               assigned_profile: t.profiles as Profile | null,
@@ -110,6 +108,10 @@ export default function ProjectDetailPage() {
     setSheetOpen(true);
   };
 
+  const handleFilterChange = useCallback((f: typeof filters) => {
+    setFilters(f);
+  }, []);
+
   if (isLoading) {
     return (
       <div className="p-6 lg:p-8 space-y-4">
@@ -131,7 +133,7 @@ export default function ProjectDetailPage() {
   const { project, videos, members } = data;
 
   return (
-    <div className="p-6 lg:p-8 max-w-7xl mx-auto">
+    <div className="p-6 lg:p-8 max-w-[1600px] mx-auto">
       {/* Header */}
       <div className="mb-6">
         <Link
@@ -165,14 +167,26 @@ export default function ProjectDetailPage() {
 
       {/* Tabs */}
       <Tabs defaultValue="gantt">
-        <TabsList className="bg-secondary mb-6">
+        <TabsList className="bg-secondary mb-4">
           <TabsTrigger value="gantt">gantt</TabsTrigger>
           <TabsTrigger value="taken">taken</TabsTrigger>
         </TabsList>
 
         <TabsContent value="gantt">
           {videos.length > 0 ? (
-            <GanttView videos={videos} onTaskClick={handleTaskClick} />
+            <>
+              <GanttFilters members={members} onFilterChange={handleFilterChange} />
+              <GanttView
+                videos={videos}
+                project={project}
+                members={members}
+                onTaskClick={handleTaskClick}
+                filterPerson={filters.person}
+                filterPhase={filters.phase}
+                filterStatus={filters.status}
+                filterSearch={filters.search}
+              />
+            </>
           ) : (
             <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-border py-16 text-muted-foreground">
               <p>nog geen video&apos;s in dit project.</p>
@@ -191,7 +205,6 @@ export default function ProjectDetailPage() {
         </TabsContent>
       </Tabs>
 
-      {/* Task detail sheet */}
       <TaskDetailSheet
         task={selectedTask}
         open={sheetOpen}
